@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Dados gerados pelo Recon Tool
+cve_cache.json
+resultado.json
+risk_report.md
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
