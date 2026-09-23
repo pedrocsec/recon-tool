@@ -1,50 +1,40 @@
+import importlib.util
 import json
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 from modules.crtsh import enumerar_subdominios
+from modules.dns import consultar_dns
 from modules.portscan import scan_ports
-from modules.techdetect import (
-    analisar_http,
-    identificar_tecnologias,
-)
+from modules.techdetect import analisar_http
 from modules.display import mostrar_resultado
 from modules.intelligence import analyze_result, print_intelligence
 
-# =========================================================
-# CVE CORRELATION 4.1
-# =========================================================
-
-from modules.cve_correlation import (
-    correlacionar_resultado,
-    print_cve_correlation,
-)
-
-# =========================================================
-# RISK SCORE 4.1
-# =========================================================
-
-from modules.risk_score import (
-    analisar_risco,
-    gerar_relatorio_markdown,
-)
+def carregar_modulo_cve():
+    caminho = Path(__file__).with_name("cve_correlation_4.1_updated.py")
+    spec = importlib.util.spec_from_file_location(
+        "cve_correlation_4_1_updated",
+        caminho
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(
+            f"Não foi possível carregar o módulo CVE: {caminho}"
+        )
+    modulo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modulo)
+    return modulo
 
 
-# =========================================================
-# CONFIGURAÇÃO
-# =========================================================
+modulo_cve = carregar_modulo_cve()
+correlacionar_resultado = modulo_cve.correlacionar_resultado
+print_cve_correlation = modulo_cve.print_cve_correlation
 
-VERSION = "4.1.2"
 
+VERSION = "4.1.3"
 REPORT_FILE = "resultado.json"
 
-RISK_REPORT_FILE = "risk_report.md"
-
-
-# =========================================================
-# UTILITÁRIOS
-# =========================================================
 
 def linha():
     print("=" * 58)
@@ -65,7 +55,6 @@ def normalizar_lista(valor):
     """
     Garante que um valor seja sempre uma lista.
     """
-
     if valor is None:
         return []
 
@@ -74,10 +63,6 @@ def normalizar_lista(valor):
 
     return [valor]
 
-
-# =========================================================
-# TECNOLOGIAS
-# =========================================================
 
 def normalizar_tecnologias(tecnologias):
     """
@@ -90,7 +75,6 @@ def normalizar_tecnologias(tecnologias):
     for tecnologia in normalizar_lista(tecnologias):
 
         if isinstance(tecnologia, str):
-
             resultado.append({
                 "name": tecnologia,
                 "version": None,
@@ -131,12 +115,17 @@ def extrair_tecnologias(dados_http):
     """
     Extrai tecnologias do resultado do analisador HTTP.
 
-    O analisador pode entregar tecnologias prontas em
-    ``technologies``. Algumas detecções, porém, dependem diretamente
-    dos headers, HTML e título. Quando esses dados existem, a mesma
-    função de detecção é executada aqui para garantir que a tecnologia
-    detectada entre no pipeline principal e, consequentemente, na
-    correlação de CVEs.
+    O techdetect pode retornar:
+        "technologies": ["Cloudflare"]
+
+    ou:
+        "technologies": [
+            {
+                "name": "Cloudflare"
+            }
+        ]
+
+    ou tecnologias separadas por protocolo.
     """
 
     tecnologias = []
@@ -144,56 +133,14 @@ def extrair_tecnologias(dados_http):
     if not isinstance(dados_http, dict):
         return tecnologias
 
-    # 1. Tecnologias já produzidas pelo analisador HTTP.
+    # Caso padrão
     tecnologias.extend(
         normalizar_tecnologias(
-            dados_http.get(
-                "technologies",
-                []
-            )
+            dados_http.get("technologies", [])
         )
     )
 
-    # 2. Detecção complementar usando headers/html/title.
-    def detectar(dados):
-
-        if not isinstance(dados, dict):
-            return
-
-        headers = dados.get("headers", {})
-
-        if not isinstance(headers, dict):
-            headers = {}
-
-        html = dados.get("html", "")
-        if not isinstance(html, str):
-            html = ""
-
-        title = dados.get("title", "")
-        if not isinstance(title, str):
-            title = ""
-
-        try:
-            detectadas = identificar_tecnologias(
-                headers,
-                html,
-                title
-            )
-
-            tecnologias.extend(
-                normalizar_tecnologias(
-                    detectadas
-                )
-            )
-
-        except Exception:
-            # Uma falha na detecção complementar não interrompe
-            # o restante do recon.
-            pass
-
-    detectar(dados_http)
-
-    # 3. Protocolos HTTP/HTTPS aninhados.
+    # Caso existam tecnologias dentro de HTTP/HTTPS
     for protocolo in ("http", "https"):
 
         dados = dados_http.get(protocolo)
@@ -203,18 +150,12 @@ def extrair_tecnologias(dados_http):
 
         tecnologias.extend(
             normalizar_tecnologias(
-                dados.get(
-                    "technologies",
-                    []
-                )
+                dados.get("technologies", [])
             )
         )
 
-        detectar(dados)
-
-    # 4. Remove duplicadas.
+    # Remove duplicadas
     unicas = []
-
     chaves = set()
 
     for tecnologia in tecnologias:
@@ -228,20 +169,31 @@ def extrair_tecnologias(dados_http):
             continue
 
         chaves.add(chave)
-
         unicas.append(tecnologia)
 
     return unicas
 
 
-# =========================================================
-# WEB DATA
-# =========================================================
-
 def construir_web_data(portas):
     """
-    Converte os dados das portas para o formato
-    utilizado pelo intelligence.py.
+    Converte:
+
+        ports -> [
+            {
+                "port": 80,
+                "http": {...}
+            }
+        ]
+
+    para:
+
+        web -> {
+            "80": {
+                "http": {...}
+            }
+        }
+
+    Esse é o formato esperado pelo intelligence.py.
     """
 
     web = {}
@@ -261,6 +213,8 @@ def construir_web_data(portas):
         if not isinstance(dados_http, dict):
             continue
 
+        # Formato atual do techdetect.analisar_http():
+        # { "http": {...}, "https": {...} }
         protocolos_aninhados = {}
 
         for protocolo in ("http", "https"):
@@ -273,40 +227,33 @@ def construir_web_data(portas):
         if protocolos_aninhados:
 
             web[str(numero)] = protocolos_aninhados
-
             continue
 
+        # Formato antigo/plano:
+        # { "protocol": "...", "status_code": ... }
         protocolo = dados_http.get(
             "protocol"
         )
 
-        if protocolo not in (
-            "http",
-            "https"
-        ):
+        if protocolo not in ("http", "https"):
 
             service = dados_http.get(
                 "service"
             )
 
             if service == "https":
-
                 protocolo = "https"
 
             elif service == "http":
-
                 protocolo = "http"
 
             else:
-
-                if dados_http.get(
-                    "status_code"
-                ) is not None:
-
+                # Não conseguimos afirmar o protocolo.
+                # Mantemos como HTTP apenas se houver
+                # status HTTP válido.
+                if dados_http.get("status_code") is not None:
                     protocolo = "http"
-
                 else:
-
                     continue
 
         web[str(numero)] = {
@@ -316,13 +263,12 @@ def construir_web_data(portas):
     return web
 
 
-# =========================================================
-# HTTP / HTTPS
-# =========================================================
-
 def enriquecer_porta(porta, host):
     """
-    Executa análise HTTP/HTTPS para uma porta aberta.
+    Executa o analisador HTTP/HTTPS para uma porta aberta
+    e mantém o resultado dentro da própria porta.
+
+    Isso preserva a estrutura usada pelo display.py.
     """
 
     numero = porta.get("port")
@@ -337,11 +283,10 @@ def enriquecer_porta(porta, host):
             numero
         )
 
-        if isinstance(
-            resultado_http,
-            dict
-        ):
+        if isinstance(resultado_http, dict):
 
+            # Caso o módulo já retorne diretamente
+            # um resultado HTTP válido.
             porta["http"] = resultado_http
 
     except Exception as erro:
@@ -356,20 +301,17 @@ def enriquecer_porta(porta, host):
     return porta
 
 
-# =========================================================
-# HOST
-# =========================================================
-
 def preparar_host(
     hostname,
     ip_info,
     status,
     portas
 ):
+    """
+    Monta a estrutura definitiva de um host.
+    """
 
-    portas = normalizar_lista(
-        portas
-    )
+    portas = normalizar_lista(portas)
 
     tecnologias = []
 
@@ -377,35 +319,23 @@ def preparar_host(
 
     for porta in portas:
 
-        if not isinstance(
-            porta,
-            dict
-        ):
+        if not isinstance(porta, dict):
             continue
 
         portas_processadas.append(
             porta
         )
 
-        http = porta.get(
-            "http"
-        )
+        http = porta.get("http")
 
-        if isinstance(
-            http,
-            dict
-        ):
+        if isinstance(http, dict):
 
             tecnologias.extend(
-                extrair_tecnologias(
-                    http
-                )
+                extrair_tecnologias(http)
             )
 
     # Remove tecnologias duplicadas
-
     tecnologias_finais = []
-
     chaves = set()
 
     for tecnologia in tecnologias:
@@ -419,7 +349,6 @@ def preparar_host(
             continue
 
         chaves.add(chave)
-
         tecnologias_finais.append(
             tecnologia
         )
@@ -438,100 +367,31 @@ def preparar_host(
     }
 
 
-# =========================================================
-# DNS
-# =========================================================
-
-def resolver_host(host):
-    """
-    Resolve IPv4 e IPv6.
-    """
-
-    try:
-
-        import socket
-
-        infos = socket.getaddrinfo(
-            host,
-            None
-        )
-
-        ipv4 = []
-
-        ipv6 = []
-
-        for info in infos:
-
-            endereco = info[4][0]
-
-            if ":" in endereco:
-
-                if endereco not in ipv6:
-
-                    ipv6.append(
-                        endereco
-                    )
-
-            else:
-
-                if endereco not in ipv4:
-
-                    ipv4.append(
-                        endereco
-                    )
-
-        if not ipv4 and not ipv6:
-            return None
-
-        return {
-            "ipv4": ipv4,
-            "ipv6": ipv6
-        }
-
-    except Exception:
-
-        return None
-
-
-# =========================================================
-# RECON COMPLETO
-# =========================================================
-
 def executar_scan(target):
+    """
+    Executa o recon completo.
+    """
+
+    target = str(target).strip().lower().rstrip(".")
 
     inicio = time.time()
-
     started_at = agora()
 
-    # =====================================================
-    # HEADER
-    # =====================================================
-
     print()
-
     linha()
-
     print(
         f"              🔎 RECON TOOL {VERSION}"
     )
-
     linha()
 
     print()
-
-    print(
-        f"[+] Alvo: {target}"
-    )
-
-    print(
-        "[+] Iniciando enumeração..."
-    )
-
+    print(f"[+] Alvo: {target}")
+    print("[+] Iniciando enumeração...")
     print()
 
-    # =====================================================
+    # =========================================================
     # ENUMERAÇÃO
-    # =====================================================
+    # =========================================================
 
     try:
 
@@ -547,42 +407,35 @@ def executar_scan(target):
 
         subdominios = []
 
-    subdominios = sorted(
-        set(
-            normalizar_lista(
-                subdominios
-            )
-        )
-    )
+    # Normaliza e deduplica os nomes retornados pelo crt.sh.
+    nomes = []
+    for nome in normalizar_lista(subdominios):
+        if not isinstance(nome, str):
+            continue
+        nome = nome.strip().lower().rstrip(".")
+        if not nome:
+            continue
+        if nome == target or nome.endswith("." + target):
+            nomes.append(nome)
 
-    # Garante que o alvo esteja presente
-
-    if target not in subdominios:
-
-        subdominios.append(
-            target
-        )
-
-    subdominios = sorted(
-        set(
-            subdominios
-        )
-    )
+    # O domínio raiz é o alvo; subdominios contém somente hosts abaixo dele.
+    subdominios = sorted(set(nomes) - {target})
+    hosts_para_analisar = [target] + subdominios
 
     print(
+        f"[+] Subdomínios encontrados: {len(subdominios)}"
+    )
+    print(
         f"[+] Total de hosts encontrados: "
-        f"{len(subdominios)}"
+        f"{len(hosts_para_analisar)}"
     )
 
-    # =====================================================
+    # =========================================================
     # RESULTADO BASE
-    # =====================================================
+    # =========================================================
 
     resultado = {
-
         "target": target,
-
-        "version": VERSION,
 
         "enumeration": {
             "source": "crt.sh",
@@ -595,72 +448,45 @@ def executar_scan(target):
             "started_at": started_at
         },
 
-        "summary": {
-
-            "total_hosts": 0,
-
-            "resolved_hosts": 0,
-
-            "unresolved_hosts": 0,
-
-            "total_open_ports": 0,
-
-            "total_technologies": 0,
-
-            "total_web_services": 0,
-
-            "total_web_observations": 0,
-
-            "total_cves_possible": 0,
-
-            "cve_hosts": 0,
-
-            "risk_hosts": 0
-        }
+        "summary": {}
     }
 
-    # =====================================================
+    # =========================================================
     # ANÁLISE DOS HOSTS
-    # =====================================================
+    # =========================================================
 
-    for host in subdominios:
+    for host in hosts_para_analisar:
 
         print()
-
         print("-" * 58)
-
         print(
             f"[+] Analisando: {host}"
         )
-
         print("-" * 58)
 
-        # -------------------------------------------------
+        # -----------------------------------------------------
         # DNS
-        # -------------------------------------------------
+        # -----------------------------------------------------
 
-        ip_info = resolver_host(
+        ip_info = consultar_dns(
             host
         )
 
-        if not ip_info:
+        if not ip_info or not (
+            ip_info.get("ipv4") or
+            ip_info.get("ipv6")
+        ):
 
             print(
                 "[-] DNS não resolveu."
             )
 
             resultado["hosts"][host] = {
-
                 "ip": None,
-
                 "status": "unresolved",
-
                 "ports": [],
-
                 "web": {},
-
                 "technologies": [],
-
                 "cves": []
             }
 
@@ -690,9 +516,9 @@ def executar_scan(target):
                 + ", ".join(ipv6)
             )
 
-        # -------------------------------------------------
+        # -----------------------------------------------------
         # PORT SCAN
-        # -------------------------------------------------
+        # -----------------------------------------------------
 
         print(
             "[+] Executando port scan..."
@@ -706,6 +532,8 @@ def executar_scan(target):
 
         except TypeError:
 
+            # Compatibilidade caso a função
+            # espere IP em vez de hostname.
             try:
 
                 portas = scan_ports(
@@ -746,9 +574,7 @@ def executar_scan(target):
             ):
                 continue
 
-            if porta.get(
-                "status"
-            ) == "open":
+            if porta.get("status") == "open":
 
                 portas_abertas.append(
                     porta
@@ -759,9 +585,9 @@ def executar_scan(target):
             f"{len(portas_abertas)}"
         )
 
-        # -------------------------------------------------
+        # -----------------------------------------------------
         # HTTP / HTTPS
-        # -------------------------------------------------
+        # -----------------------------------------------------
 
         for porta in portas_abertas:
 
@@ -779,128 +605,80 @@ def executar_scan(target):
                 host
             )
 
-        # -------------------------------------------------
+        # -----------------------------------------------------
         # HOST FINAL
-        # -------------------------------------------------
+        # -----------------------------------------------------
 
         resultado["hosts"][host] = preparar_host(
-
             hostname=host,
-
             ip_info=ip_info,
-
             status="resolved",
-
             portas=portas_abertas
         )
 
-    # =====================================================
+    # =========================================================
     # RESUMO
-    # =====================================================
+    # =========================================================
 
     finished_at = agora()
+    duration = time.time() - inicio
 
-    duration = (
-        time.time()
-        - inicio
-    )
-
-    hosts = resultado[
-        "hosts"
-    ]
+    hosts = resultado["hosts"]
 
     resolved_hosts = sum(
-
         1
-
         for dados in hosts.values()
-
-        if dados.get(
-            "status"
-        ) == "resolved"
+        if dados.get("status") == "resolved"
     )
 
     unresolved_hosts = sum(
-
         1
-
         for dados in hosts.values()
-
-        if dados.get(
-            "status"
-        ) == "unresolved"
+        if dados.get("status") == "unresolved"
     )
 
     total_open_ports = sum(
-
         len(
-
             [
-
                 porta
-
                 for porta in dados.get(
                     "ports",
                     []
                 )
-
-                if porta.get(
-                    "status"
-                ) == "open"
-
+                if porta.get("status") == "open"
             ]
-
         )
-
         for dados in hosts.values()
     )
 
     total_technologies = sum(
-
         len(
-
             dados.get(
                 "technologies",
                 []
             )
-
         )
-
         for dados in hosts.values()
     )
 
     resultado["scan"].update({
-
-        "finished_at":
-            finished_at,
-
-        "duration_seconds":
-            duration
+        "finished_at": finished_at,
+        "duration_seconds": duration
     })
 
-    resultado["summary"].update({
+    resultado["summary"] = {
+        "total_hosts": len(hosts),
+        "resolved_hosts": resolved_hosts,
+        "unresolved_hosts": unresolved_hosts,
+        "total_open_ports": total_open_ports,
+        "total_technologies": total_technologies,
+        "total_web_services": 0,
+        "total_web_observations": 0
+    }
 
-        "total_hosts":
-            len(hosts),
-
-        "resolved_hosts":
-            resolved_hosts,
-
-        "unresolved_hosts":
-            unresolved_hosts,
-
-        "total_open_ports":
-            total_open_ports,
-
-        "total_technologies":
-            total_technologies
-    })
-
-    # =====================================================
-    # RECON INTELLIGENCE
-    # =====================================================
-
-    print()
+    # =========================================================
+    # INTELLIGENCE
+    # =========================================================
 
     print(
         "[+] Executando RECON INTELLIGENCE..."
@@ -912,33 +690,14 @@ def executar_scan(target):
             resultado
         )
 
-        resultado[
-            "intelligence"
-        ] = analysis
+        resultado["intelligence"] = analysis
 
-        exposure = (
-            analysis.get(
-                "exposure",
-                {}
-            )
+        exposure = analysis.get("exposure", {})
+        resultado["summary"]["total_web_services"] = exposure.get(
+            "web_services", 0
         )
-
-        resultado[
-            "summary"
-        ][
-            "total_web_services"
-        ] = exposure.get(
-            "web_services",
-            0
-        )
-
-        resultado[
-            "summary"
-        ][
-            "total_web_observations"
-        ] = exposure.get(
-            "web_observations",
-            0
+        resultado["summary"]["total_web_observations"] = exposure.get(
+            "web_observations", 0
         )
 
         print_intelligence(
@@ -952,251 +711,82 @@ def executar_scan(target):
             f"{erro}"
         )
 
-        resultado[
-            "intelligence"
-        ] = {
+        resultado["intelligence"] = {
             "error": str(erro)
         }
 
-    # =====================================================
-    # RECON CVE CORRELATION 4.1
-    # =====================================================
+    # =========================================================
+    # RECON CVE CORRELATION 4.1.3
+    # =========================================================
 
     print()
-
-    print(
-        "[+] Executando RECON CVE CORRELATION..."
-    )
+    print("[+] Executando RECON CVE CORRELATION...")
 
     try:
-
         cve_analysis = correlacionar_resultado(
             resultado
         )
 
-        resultado[
-            "cve_correlation"
-        ] = cve_analysis
+        resultado["cve_correlation"] = cve_analysis
 
-        # -------------------------------------------------
-        # Estatísticas CVE
-        # -------------------------------------------------
-
-        resultado[
-            "summary"
-        ][
-            "total_cves_possible"
-        ] = cve_analysis.get(
+        resultado["summary"]["total_cves_possible"] = cve_analysis.get(
             "cves_possiveis_total",
             0
         )
-
-        resultado[
-            "summary"
-        ][
-            "cve_hosts"
-        ] = cve_analysis.get(
+        resultado["summary"]["cve_hosts"] = cve_analysis.get(
             "hosts_com_cves_possiveis",
             0
         )
-
-        # -------------------------------------------------
-        # Copia CVEs possíveis para cada host
-        # -------------------------------------------------
-
-        hosts_cve = cve_analysis.get(
-            "hosts",
-            {}
+        resultado["summary"]["cve_technologies_processed"] = cve_analysis.get(
+            "tecnologias_processadas",
+            0
+        )
+        resultado["summary"]["cve_cpes_consulted"] = cve_analysis.get(
+            "cpes_consultados",
+            0
+        )
+        resultado["summary"]["cve_cache_hits"] = cve_analysis.get(
+            "cache_hits",
+            0
         )
 
-        if isinstance(
-            hosts_cve,
-            dict
-        ):
+        hosts_cve = cve_analysis.get("hosts", {})
 
+        if isinstance(hosts_cve, dict):
             for host, dados_cve in hosts_cve.items():
-
-                if host not in resultado[
-                    "hosts"
-                ]:
+                if host not in resultado["hosts"]:
                     continue
 
-                if not isinstance(
-                    dados_cve,
-                    dict
-                ):
+                if not isinstance(dados_cve, dict):
                     continue
 
-                possiveis = (
-                    dados_cve.get(
-                        "cves_possiveis",
-                        []
-                    )
+                resultado["hosts"][host]["cves"] = dados_cve.get(
+                    "cves_possiveis",
+                    []
                 )
-
-                resultado[
-                    "hosts"
-                ][
-                    host
-                ][
-                    "cves"
-                ] = possiveis
 
         print_cve_correlation(
             cve_analysis
         )
 
     except Exception as erro:
-
         print(
-            f"[-] Falha na RECON CVE CORRELATION: "
-            f"{erro}"
+            f"[-] Falha na RECON CVE CORRELATION: {erro}"
         )
 
-        resultado[
-            "cve_correlation"
-        ] = {
-            "error": str(erro)
+        resultado["cve_correlation"] = {
+            "version": "4.1.3",
+            "error": str(erro),
+            "cves_possiveis_total": 0,
+            "hosts_com_cves_possiveis": 0
         }
 
-    # =====================================================
-    # RECON RISK PRIORITIZATION 4.1.2
-    # =====================================================
+        resultado["summary"]["total_cves_possible"] = 0
+        resultado["summary"]["cve_hosts"] = 0
 
-    print()
-
-    print(
-        "[+] Executando RECON RISK PRIORITIZATION..."
-    )
-
-    try:
-
-        risk_analysis = analisar_risco(
-            resultado
-        )
-
-        resultado[
-            "risk_prioritization"
-        ] = risk_analysis
-
-        ranking = risk_analysis.get(
-            "ranking",
-            []
-        )
-
-        resultado[
-            "summary"
-        ][
-            "risk_hosts"
-        ] = len(
-            ranking
-        )
-
-        print()
-
-        print("=" * 58)
-
-        print(
-            "              🎯 RISK PRIORITIZATION 4.1.2"
-        )
-
-        print("=" * 58)
-
-        print()
-
-        print(
-            "⚠️ Score heurístico de priorização."
-        )
-
-        print(
-            "   Não constitui confirmação de vulnerabilidade."
-        )
-
-        print()
-
-        if ranking:
-
-            print(
-                "📊 PRIORIDADE DE INVESTIGAÇÃO:"
-            )
-
-            for indice, item in enumerate(
-                ranking,
-                start=1
-            ):
-
-                print(
-
-                    f"   {indice}. "
-                    f"{item.get('host', '?')} "
-                    f"→ "
-                    f"{item.get('score', 0)}/100 "
-                    f"[{item.get('nivel', '?')}]"
-
-                )
-
-        else:
-
-            print(
-                "   Nenhum host disponível."
-            )
-
-        print()
-
-        print("=" * 58)
-
-    except Exception as erro:
-
-        print(
-            "[-] Falha na "
-            "RECON RISK PRIORITIZATION: "
-            f"{erro}"
-        )
-
-        resultado[
-            "risk_prioritization"
-        ] = {
-            "error": str(erro)
-        }
-
-    # =====================================================
-    # RELATÓRIO DE RISCO
-    # =====================================================
-
-    print()
-
-    print(
-        "[+] Gerando relatório de risco..."
-    )
-
-    try:
-
-        gerar_relatorio_markdown(
-            resultado,
-            RISK_REPORT_FILE
-        )
-
-        print(
-            f"[+] Relatório de risco salvo em "
-            f"{RISK_REPORT_FILE}"
-        )
-
-    except Exception as erro:
-
-        print(
-            "[-] Erro ao gerar relatório de risco: "
-            f"{erro}"
-        )
-
-    # =====================================================
+    # =========================================================
     # SALVAR JSON
-    # =====================================================
-
-    print()
-
-    print(
-        "[+] Salvando resultado completo..."
-    )
+    # =========================================================
 
     try:
 
@@ -1213,52 +803,46 @@ def executar_scan(target):
                 ensure_ascii=False
             )
 
-        print(
-            f"[+] Relatório completo salvo em "
-            f"{REPORT_FILE}"
-        )
-
     except Exception as erro:
 
         print()
-
         print(
             f"[-] Erro ao salvar "
             f"{REPORT_FILE}: {erro}"
         )
 
-    # =====================================================
+    # =========================================================
     # RESULTADO FINAL
-    # =====================================================
+    # =========================================================
 
     mostrar_resultado(
         resultado
     )
 
     print()
-
     linha()
-
     print(
         "[+] Recon finalizado."
     )
-
     linha()
 
     return resultado
 
 
-# =========================================================
-# MAIN
-# =========================================================
-
 def main():
+
+    # ---------------------------------------------------------
+    # Argumento opcional:
+    #
+    # python3 main.py example.com
+    #
+    # Se nenhum argumento for fornecido,
+    # usamos example.com para teste.
+    # ---------------------------------------------------------
 
     if len(sys.argv) > 1:
 
-        target = sys.argv[
-            1
-        ].strip()
+        target = sys.argv[1].strip()
 
     else:
 
@@ -1277,10 +861,5 @@ def main():
     )
 
 
-# =========================================================
-# ENTRY POINT
-# =========================================================
-
 if __name__ == "__main__":
-
     main()

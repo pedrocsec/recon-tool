@@ -1,48 +1,39 @@
-# Recon Tool 4.1.2
+# Recon Tool 4.1.3
 
-Ferramenta de reconhecimento e análise de superfície de ataque desenvolvida em Python para fins de estudo, laboratórios e avaliações de segurança autorizadas.
+Ferramenta de reconnaissance desenvolvida em Python para automatizar etapas iniciais de análise de superfície de ataque em alvos autorizados.
 
-## Objetivo
+O projeto foi desenvolvido para aprendizado em cibersegurança, laboratórios e avaliações de segurança realizadas com autorização.
 
-O Recon Tool automatiza etapas iniciais de reconhecimento a partir de um domínio ou alvo autorizado, organizando os resultados em um relatório estruturado.
+## Funcionalidades
 
-A versão 4.1.2 reúne:
+A versão 4.1.3 realiza:
 
-- Enumeração de subdomínios via Certificate Transparency (`crt.sh`)
+- Enumeração de subdomínios através de Certificate Transparency usando `crt.sh`
 - Resolução DNS
-- Identificação de hosts acessíveis
-- Port scan básico
+- Identificação de hosts resolvidos e não resolvidos
+- Port scanning básico
 - Análise HTTP/HTTPS
-- Detecção de tecnologias
+- Identificação de serviços web
+- Detecção de tecnologias através de evidências HTTP
 - Análise de security headers
 - Recon Intelligence
-- Correlação possível entre tecnologias e CVEs via NVD
-- Priorização heurística de risco
-- Geração de relatório em Markdown
-- Geração de resultado completo em JSON
+- Correlação possível entre tecnologias identificadas e vulnerabilidades do NVD
+- Validação da configuração do CVE contra o CPE identificado para reduzir correlações incorretas
+- Cache local das consultas de CVE
+- Geração de relatório estruturado em JSON
 
-## Estrutura
+A correlação de CVE representa uma **possibilidade de correspondência**, e não uma confirmação de vulnerabilidade.
 
-```text
-recon-tool-v4.1.2-fixed/
-├── main.py
-├── mock_server.py
-├── modules/
-│   ├── asset.py
-│   ├── crtsh.py
-│   ├── cve_correlation.py
-│   ├── display.py
-│   ├── dns.py
-│   ├── enumerator.py
-│   ├── http.py
-│   ├── intelligence.py
-│   ├── ports.py
-│   ├── portscan.py
-│   ├── reporter.py
-│   ├── risk_score.py
-│   ├── security_headers.py
-│   ├── techdetect.py
-│   └── technology.py
-└── tests/
-    ├── test_cve_correlation.py
-    └── test_imports.py
+## Requisitos
+
+- Python 3.9+
+- Conexão com a internet para consultas ao `crt.sh` e NVD
+- Dependências listadas em `requirements.txt`
+
+## Instalação
+
+Clone o repositório:
+
+```bash
+git clone <URL_DO_REPOSITORIO>
+cd recon-tool
