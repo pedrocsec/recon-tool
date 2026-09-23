@@ -35,5 +35,5 @@ A correlação de CVE representa uma **possibilidade de correspondência**, e n�
 Clone o repositório:
 
 ```bash
-git clone <URL_DO_REPOSITORIO>
+git clone https://github.com/pedrocsec/recon-tool.git
 cd recon-tool
